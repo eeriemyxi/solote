@@ -1,53 +1,11 @@
 package solote
 
-import "core:c"
 import "core:fmt"
+import "core:log"
 import "core:mem"
-import "core:slice"
 import "core:os/os2"
-
-ID3v2_Header :: struct {
-	fident:   string,
-	version:  struct {
-		major:    u8,
-		revision: u8,
-	},
-	flags:    bit_field u8 {
-		unsynchronisation: bool | 1,
-		extended_header:   bool | 1,
-		experimental:      bool | 1,
-	},
-	tag_size: i32,
-}
-
-Frame_Header :: struct {
-	id:             string,
-	size:           i32,
-	status_flags:   bit_field u8 {
-		alter_tag:  bool | 1,
-		alter_file: bool | 1,
-		read_only:  bool | 1,
-	},
-	encoding_flags: bit_field u8 {
-		compression:       bool | 1,
-		encryption:        bool | 1,
-		grouping_identity: bool | 1,
-	},
-	data:           []u8,
-}
-
-print_bits :: proc(n: $T) {
-	for i := size_of(n) * c.CHAR_BIT - 1; i >= 0; i -= 1 {
-		fmt.print(n >> u64(i) & 1)
-		if i % 8 == 0 do fmt.print(" ")
-	}
-	fmt.println()
-}
-
-unsync :: proc(raw: []u8) -> (size: i32 = 0) {
-	for s in raw do size = (size << 7) | (i32(s) & 127)
-	return
-}
+import "core:reflect"
+import "core:slice"
 
 read_bytes :: proc(data: []u8, pos: ^int, offset: int) -> (result: []u8, success: bool) {
 	if len(data) < pos^ do return nil, false
@@ -56,87 +14,132 @@ read_bytes :: proc(data: []u8, pos: ^int, offset: int) -> (result: []u8, success
 	return result, true
 }
 
+read_bytes_until :: proc(data: []u8, pos: ^int, until: u8) -> (result: []u8, success: bool) {
+	if len(data) < pos^ do return nil, false
+	prev_pos := pos^
+	for c in data[pos^:] {
+		if c == until do break
+		pos^ += 1
+	}
+	result = data[prev_pos:pos^]
+	return result, true
+}
+
+frame_type_to_string :: proc(type: ID3v2_Frame_Type) -> string {
+	return reflect.enum_string(type)
+}
+
+frame_id_to_type :: proc(id_s: string) -> ID3v2_Frame_Type {
+	type, ok := reflect.enum_from_name(ID3v2_Frame_Type, id_s)
+	if !ok do return .Unknown
+	return type
+}
+
+parse_header :: proc(raw_header: []u8) -> (header: ID3v2_Header, ok: bool) {
+    // https://id3.org/id3v2.3.0#:~:text=must%20be%20%2400.-,3.1.%20ID3v2%20header,-The%20ID3v2%20tag
+	header, ok = slice.to_type(raw_header, ID3v2_Header)
+	header.tag_size = unsync(header.tag_size)
+	return
+}
+
+parse_frame_data_apic :: proc(data: []u8) -> (apic: ID3v2_APIC_Frame_Data) {
+    // https://id3.org/id3v2.3.0#:~:text=4.15.%20Attached%20picture
+	pos := 0
+	apic.text_encoding = ID3v2_Text_Encoding_Type(
+		(read_bytes(data, &pos, 1) or_else panic("todo"))[0],
+	)
+	apic.mime_type = string(read_bytes_until(data, &pos, 0) or_else panic("todo"))
+	apic.picture_type = ID3v2_APIC_Picture_Type(
+		(read_bytes(data, &pos, 1) or_else panic("todo"))[0],
+	)
+	apic.description = string(read_bytes_until(data, &pos, 0) or_else panic("todo"))
+	apic.data = data[pos:]
+	return
+}
+
+parse_frame :: proc(data: []u8, pos: ^int) -> (frame_data: ID3v2_Frame_Data) {
+    // https://id3.org/id3v2.3.0#:~:text=3.3.%20ID3v2%20frame%20overview
+	raw_frame_header := read_bytes(data, pos, 10) or_else panic("Error")
+	frame_header, ok := slice.to_type(raw_frame_header, ID3v2_Frame_Header)
+
+	for b in raw_frame_header[4:8] do frame_header.size = frame_header.size << 8 | u32(b)
+
+	raw_data := read_bytes(data, pos, int(frame_header.size)) or_else panic("Error")
+
+	id_s := string(frame_header.id[:])
+	type := frame_id_to_type(id_s)
+
+	frame_data = ID3v2_Frame_Data {
+		header = frame_header,
+		type   = type,
+		data   = raw_data,
+	}
+	if type == .APIC {
+		frame_data.data = parse_frame_data_apic(raw_data)
+	}
+	log.debugf("frame_data=%v", frame_data)
+
+	return
+}
+
+parse_frames_for_header :: proc(frames: ^[dynamic]ID3v2_Frame_Data, tag_size: u32, data: []u8) {
+	pos := 0
+	for pos < int(tag_size) {
+		if string(data[pos:][:4]) == "\x00\x00\x00\x00" {
+			log.debugf("padding reached at pos=%v", pos)
+			return
+		}
+
+		frame_data: ID3v2_Frame_Data
+		frame_data = parse_frame(data, &pos)
+		append(frames, frame_data)
+	}
+}
+
+sync :: proc(raw: u32) -> (result: [4]u8) {
+	assert(raw <= 0x0FFFFFFF)
+
+	shift: u32 = 21
+	for index in 0 ..< 4 {
+		result[index] = u8(raw >> shift & 127)
+		shift -= 7
+	}
+	return
+}
+
+unsync :: proc(raw: u32) -> (size: u32 = 0) {
+	for s in transmute([4]u8)raw do size = (size << 7) | (u32(s) & 127)
+	return
+}
+
 main :: proc() {
+	context.logger = log.create_console_logger()
+
 	if len(os2.args) != 2 {
-		fmt.eprintln("[ERROR] Must provide the file to scan.")
+		log.error("Must provide the file to scan.")
 		os2.exit(1)
 	}
 
 	filename := os2.args[1]
 	file, err := os2.read_entire_file(filename, context.allocator)
 
-	header := ID3v2_Header{}
 	pos := 0
-
-	header.fident = string(read_bytes(file, &pos, 3) or_else panic("file identifier not found"))
-
-	raw_version := read_bytes(file, &pos, 2) or_else panic("version not found")
-	mem.copy(&header.version, &raw_version[0], size_of(header.version))
-
-	raw_flags := (read_bytes(file, &pos, 1) or_else panic("flags not found"))[0]
-	mem.copy(&header.flags, &raw_flags, size_of(header.flags))
-
-	raw_tag_size := read_bytes(file, &pos, 4) or_else panic("tag size not found")
-	header.tag_size = unsync(raw_tag_size)
-
-	fmt.printfln(
-		"fident=%s version=%v flags=%08b raw_tag_size=%08b-%08b-%08b-%08b tag_size=%d (%32b)",
-		header.fident,
-		raw_version,
-		raw_flags,
-		raw_tag_size[0],
-		raw_tag_size[1],
-		raw_tag_size[2],
-		raw_tag_size[3],
-		header.tag_size,
-		header.tag_size,
-	)
-
-	fmt.println(header)
-
-	for pos < int(header.tag_size) {
-		frame_header := Frame_Header{}
-
-		frame_header.id = string(read_bytes(file, &pos, 4) or_else panic("frame id not found"))
-		if frame_header.id == "\x00\x00\x00\x00" {
-			fmt.println("[INFO] padding reached at pos=%d", pos)
-			break
-		}
-
-		frame_raw_size := read_bytes(file, &pos, 4) or_else panic("frame size not found")
-		for b in frame_raw_size do frame_header.size = frame_header.size << 8 | i32(b)
-
-		raw_frame_status_flags :=
-			(read_bytes(file, &pos, 1) or_else panic("frame status flags not found"))[0]
-		raw_frame_encoding_flags :=
-			(read_bytes(file, &pos, 1) or_else panic("frame encoding flags not found"))[0]
-
-		mem.copy(
-			&frame_header.status_flags,
-			&raw_frame_status_flags,
-			size_of(frame_header.status_flags),
+	raw_header := read_bytes(file, &pos, 10) or_else panic("Error")
+	header, ok := parse_header(raw_header)
+	if !ok {
+		log.debugf(
+			"header ok=%v, with raw_header=%v and string(raw_header)=",
+			ok,
+			raw_header,
+			string(raw_header),
 		)
-		mem.copy(
-			&frame_header.encoding_flags,
-			&raw_frame_encoding_flags,
-			size_of(frame_header.encoding_flags),
-		)
-
-		frame_header.data =
-			read_bytes(file, &pos, int(frame_header.size)) or_else panic("frame data not found")
-
-		fmt.println(frame_header)
-		fmt.printfln(
-			"frame_id=%s raw_size=%08b-%08b-%08b-%08b size=%d (%32b) status_flags=%08b encoding_flags=%08b",
-			frame_header.id,
-			frame_raw_size[0],
-			frame_raw_size[1],
-			frame_raw_size[2],
-			frame_raw_size[3],
-			frame_header.size,
-			frame_header.size,
-			raw_frame_status_flags,
-			raw_frame_encoding_flags,
-		)
+		log.info("File likely doesn't have ID3 data.")
+		os2.exit(1)
 	}
+
+	log.debugf("header=%v", header)
+
+	frames: [dynamic]ID3v2_Frame_Data
+	parse_frames_for_header(&frames, header.tag_size, file[pos:])
+	log.debugf("frames=%v", frames)
 }
