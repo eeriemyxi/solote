@@ -1,5 +1,6 @@
 package solote
 
+import "core:encoding/endian"
 import "core:fmt"
 import "core:log"
 import "core:reflect"
@@ -29,11 +30,14 @@ parse_frame_data_apic :: proc(data: []u8) -> (apic: ID3v2_APIC_Frame_Data) {
 		(read_bytes(data, &pos, 1) or_else panic("todo"))[0],
 	)
 	bom := read_bytes(data, &pos, 2) or_else panic("todo")
-	apic.bom = {bom[0], bom[1]}
+	apic.bom = transmute(type_of(apic.bom))(u16(bom[0]) << 8 | u16(bom[1]))
 	apic.raw_description = read_bytes_until(data, &pos, {0, 0}, true) or_else panic("todo")
-	apic.description = fmt.aprint(string16(slice.reinterpret([]u16, apic.raw_description)))
+	desc_u16 := slice.reinterpret([]u16, apic.raw_description)
+	if apic.bom == .BE && endian.PLATFORM_BYTE_ORDER == .Little {
+		for &b in desc_u16 do b = (b >> 8) | (b << 8)
+	}
+	apic.description = fmt.aprint(string16(desc_u16))
 	apic.data = data[pos:]
-
 	return
 }
 

@@ -92,7 +92,10 @@ ID3v2_APIC_Frame_Data :: struct {
 	text_encoding:   ID3v2_Text_Encoding_Type,
 	mime_type:       string,
 	picture_type:    ID3v2_APIC_Picture_Type,
-	bom:             [2]u8,
+	bom:             enum u16 {
+		LE = 0xFFFE,
+		BE = 0xFEFF,
+	},
 	raw_description: []u8,
 	description:     string,
 	data:            []u8 `fmt:"-"`,
