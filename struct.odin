@@ -89,9 +89,11 @@ ID3v2_APIC_Picture_Type :: enum u8 {
 }
 
 ID3v2_APIC_Frame_Data :: struct {
-	text_encoding: ID3v2_Text_Encoding_Type,
-	mime_type:     string,
-	picture_type:  ID3v2_APIC_Picture_Type,
-	description:   string,
-	data:          []u8 `fmt:"-"`,
+	text_encoding:   ID3v2_Text_Encoding_Type,
+	mime_type:       string,
+	picture_type:    ID3v2_APIC_Picture_Type,
+	bom:             [2]u8,
+	raw_description: []u8,
+	description:     string,
+	data:            []u8 `fmt:"-"`,
 }
