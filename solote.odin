@@ -48,6 +48,7 @@ parse_frame_data_apic :: proc(data: []u8) -> (apic: ID3v2_APIC_Frame_Data) {
 	apic.text_encoding = ID3v2_Text_Encoding_Type(
 		(read_bytes(data, &pos, 1) or_else panic("todo"))[0],
 	)
+    assert(apic.text_encoding == .UTF_8 || apic.text_encoding == .ISO_8859_1, "UTF-16 not yet supported")
 	apic.mime_type = string(read_bytes_until(data, &pos, 0) or_else panic("todo"))
 	apic.picture_type = ID3v2_APIC_Picture_Type(
 		(read_bytes(data, &pos, 1) or_else panic("todo"))[0],
